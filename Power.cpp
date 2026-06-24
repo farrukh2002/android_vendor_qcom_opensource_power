@@ -35,6 +35,7 @@
 
 #include "Power.h"
 #include "PowerHintSession.h"
+#include "performance.h"
 
 #include <android-base/file.h>
 #include <android-base/logging.h>
@@ -158,6 +159,9 @@ ndk::ScopedAStatus Power::setBoost(Boost type, int32_t durationMs) {
         case Boost::INTERACTION:
             power_hint(POWER_HINT_INTERACTION, &durationMs);
             break;
+        case Boost::DISPLAY_UPDATE_IMMINENT:
+            process_boost(VENDOR_HINT_DISPLAY_EARLY_WAKEUP, durationMs, 0);
+            break;
         default:
             LOG(INFO) << "Boost " << static_cast<int32_t>(type) << "Not Supported";
             break;
@@ -169,6 +173,7 @@ ndk::ScopedAStatus Power::isBoostSupported(Boost type, bool* _aidl_return) {
     LOG(INFO) << "Power isBoostSupported: " << static_cast<int32_t>(type);
     switch (type) {
         case Boost::INTERACTION:
+        case Boost::DISPLAY_UPDATE_IMMINENT:
             *_aidl_return = true;
             break;
         default:
@@ -226,37 +231,56 @@ ndk::ScopedAStatus Power::getHintSessionPreferredRate(int64_t* outNanoseconds) {
     return ndk::ScopedAStatus::ok();
 }
 
-template <class T>
-constexpr size_t enum_size() {
-    return static_cast<size_t>(*(ndk::enum_range<T>().end() - 1)) + 1;
-}
-
 template <class E>
-int64_t bitsForEnum() {
-    return static_cast<int64_t>(std::bitset<enum_size<E>()>().set().to_ullong());
+int64_t bitForEnum(E value) {
+    return 1LL << static_cast<int32_t>(value);
 }
 
 ndk::ScopedAStatus Power::getSupportInfo(SupportInfo* _aidl_return) {
     LOG(INFO) << "Power getSupportInfo";
-    static SupportInfo supportInfo = {.usesSessions = false,
-                                      .boosts = bitsForEnum<Boost>(),
-                                      .modes = bitsForEnum<Mode>(),
-                                      .sessionHints = 0,
-                                      .sessionModes = 0,
-                                      .sessionTags = 0,
-                                      .compositionData =
-                                              {
-                                                      .isSupported = false,
-                                                      .disableGpuFences = false,
-                                                      .maxBatchSize = 1,
-                                                      .alwaysBatch = false,
-                                              },
-                                      .headroom = {
-                                              .isCpuSupported = false,
-                                              .isGpuSupported = false,
-                                              .cpuMinIntervalMillis = 0,
-                                              .gpuMinIntervalMillis = 0,
-                                      }};
+    int64_t supportedBoosts = bitForEnum(Boost::INTERACTION) |
+                              bitForEnum(Boost::DISPLAY_UPDATE_IMMINENT);
+    int64_t supportedModes = bitForEnum(Mode::LAUNCH) |
+                             bitForEnum(Mode::INTERACTIVE) |
+                             bitForEnum(Mode::SUSTAINED_PERFORMANCE) |
+                             bitForEnum(Mode::FIXED_PERFORMANCE);
+
+    if (is_expensive_rendering_supported()) {
+        supportedModes |= bitForEnum(Mode::EXPENSIVE_RENDERING);
+    }
+
+#ifdef TAP_TO_WAKE_NODE
+    supportedModes |= bitForEnum(Mode::DOUBLE_TAP_TO_WAKE);
+#endif
+
+#ifdef MODE_EXT
+    bool supported = false;
+    for (Mode mode : ndk::enum_range<Mode>()) {
+        if (isDeviceSpecificModeSupported(mode, &supported) && supported) {
+            supportedModes |= bitForEnum(mode);
+        }
+    }
+#endif
+
+    SupportInfo supportInfo = {.usesSessions = false,
+                               .boosts = supportedBoosts,
+                               .modes = supportedModes,
+                               .sessionHints = 0,
+                               .sessionModes = 0,
+                               .sessionTags = 0,
+                               .compositionData =
+                                       {
+                                               .isSupported = false,
+                                               .disableGpuFences = false,
+                                               .maxBatchSize = 1,
+                                               .alwaysBatch = false,
+                                       },
+                               .headroom = {
+                                       .isCpuSupported = false,
+                                       .isGpuSupported = false,
+                                       .cpuMinIntervalMillis = 0,
+                                       .gpuMinIntervalMillis = 0,
+                               }};
     *_aidl_return = supportInfo;
     return ndk::ScopedAStatus::ok();
 }
